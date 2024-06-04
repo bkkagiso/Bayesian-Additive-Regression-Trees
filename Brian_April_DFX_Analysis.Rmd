@@ -1,0 +1,960 @@
+---
+title: "Time Series- Ensemble methods"
+author: "Brian K.April"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+# Load required libraries
+library(randomForest)
+library(xts)
+library(ggplot2)
+library(haven)
+library(tidyr)
+library(xgboost)
+library(lightgbm)
+library(gbm)
+library(dplyr)
+library(caret)
+library(corrplot)
+library(dbarts)
+library(VIM)
+library(mice)
+library(missMethods)
+library(norm)
+library(imputeTS)
+
+```
+
+
+```{r}
+#library(naniar)
+setwd("/home/student23/Thesis")
+
+ts_data <- read.csv("diamond_merged.csv")
+ts_df = ts_data[ ,-c(1)]
+# Convert the time series to a data frame
+#ts_df <- data.frame(Date = index(ts_data), Passengers = coredata(ts_data))
+
+# Convert Date to a time series object
+ts_df$date <- as.Date(ts_df$date)
+
+ts_df <- ts_df %>%
+  arrange(date)
+ts_df_1 <- ts_df
+# print missing values totals by column
+colSums(is.na(ts_df))
+
+```
+
+```{r}
+ts_df_1 <- ts_df %>%
+  rename(
+    Date = date,
+    Price = diamond.price,
+    Inflation = inflation.rate,
+    Interest = interest.rate,
+    Fed_Rate = fed.rate,
+    Gold_Price = gold.price
+  )
+
+
+VIM::aggr(ts_df_1, numbers=T,axis=T,labels=names(ts_df_1),sortVars=TRUE )
+
+```
+
+# Imputing missing values
+```{r}
+set.seed(1234)
+ts_df = na_interpolation(ts_df)
+```
+
+```{r}
+colSums(is.na(ts_df))
+
+```
+
+# Plot of the index
+
+```{r}
+library(ggplot2)
+
+plot_org <- ts_df %>%
+  ggplot(aes(date, diamond.price)) +
+  geom_line() +
+  scale_x_date(limits = as.Date(c("2018-01-01", "2021-12-30")), date_breaks = "1 year", 
+               date_labels = "%Y") +
+  theme_minimal() +
+  labs(title = "Diamond Financial Index (DFX)", x = "Year", y = "Dollars")
+
+print(plot_org)
+
+```
+
+
+```{r}
+
+M <- cor(ts_df[, -1])
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(M, method = "number", type = "upper", tl.col = "black", tl.srt = 30, 
+         tl.cex = 0.9)
+
+```
+
+
+# Ftting Models 
+
+
+```{r}
+# Split dataset into training and testing sets
+train_df <- ts_df[ts_df$date <= as.Date("2020-04-28"), ]
+test_df <- ts_df[ts_df$date >= as.Date("2020-04-29") & ts_df$date <= as.Date("2021-06-04"), ]
+
+# Set date column as index
+rownames(train_df) <- train_df$date
+rownames(test_df) <- test_df$date
+
+train_df <- train_df[, -1 ]
+test_df <- test_df[,-1]
+# Drop the date column
+#train_df$date <- NULL
+#test_df$date <- NULL
+
+# Calculate the percentage of data in each set
+total_rows <- nrow(ts_df)
+train_rows <- nrow(train_df)
+test_rows <- nrow(test_df)
+```
+
+
+```{r}
+train_percentage <- (train_rows / total_rows) * 100
+test_percentage <- (test_rows / total_rows) * 100
+
+# Print the percentages
+print(paste("Percentage of data in training set:", round(train_percentage,2), "%"))
+print(paste("Percentage of data in testing set:", round(test_percentage,2), "%"))
+
+```
+
+# Fit a Random Forest model
+```{r}
+
+# Calculate MAPE function
+mape <- function(actual, forecast) {
+  mean(abs((actual - forecast) / actual)) * 100
+}
+
+
+set.seed(11)
+rf_model_1 <- randomForest( diamond.price~ ., data = train_df, ntree =500)
+```
+
+```{r}
+# Make predictions on the test data
+predictions_rf_1 <- predict(rf_model_1, newdata = test_df)
+ 
+# Evaluate the model using RMSE
+rmse_rf_1 <- sqrt(mean((test_df$diamond.price - predictions_rf_1)^2))
+
+# Calculate R-squared
+r_squared_rf_1 <- R2(pred = predictions_rf_1, obs = test_df$diamond.price)
+
+# Mean Squared Error (MSE)
+mse_rf_1 <- mean((test_df$diamond.price - predictions_rf_1)^2)
+
+mape_rf_1 <-mape(test_df$diamond.price, predictions_rf_1)
+
+# Mean Absolute Error (MAE)
+mae_rf_1 <- mean(abs(test_df$diamond.price - predictions_rf_1))
+
+# Print out the evaluation metrics
+cat("Random Forest Evaluation","\n")
+cat("RMSE:", rmse_rf_1, "\n")
+cat("R-squared:", r_squared_rf_1, "\n")
+cat("MAPE", mape_rf_1, "\n")
+cat("MAE:", mae_rf_1, "\n")
+
+```
+
+# Gradient Boosting Machine
+
+```{r}
+# Define the training control
+train_control <- trainControl(method = "cv", number = 5)  
+
+# Train the GBM model using caret
+gbm_model <- train(
+  diamond.price ~ .,
+  data = train_df,
+  method = "gbm",  # GBM method
+  trControl = train_control,
+  metric = "RMSE"  # Root Mean Squared Error as evaluation metric
+  , verbose =FALSE
+)
+```
+
+```{r}
+# Make predictions
+gbm_predictions <- predict(gbm_model, test_df)
+
+# Evaluate GBM model
+gbm_rmse <- sqrt(mean((test_df$diamond.price - gbm_predictions)^2))
+gbm_r_squared <- cor(test_df$diamond.price, gbm_predictions)^2
+gbm_mse <- mean((test_df$diamond.price - gbm_predictions)^2)
+gbm_mae <- mean(abs(test_df$diamond.price - gbm_predictions))
+gbm_mape <-mape(test_df$diamond.price, gbm_predictions)
+# Print out the evaluation metrics for GBM
+cat("Gradient Boosting Trees Model Evaluation\n")
+cat("RMSE:", gbm_rmse, "\n")
+cat("R-squared:", gbm_r_squared, "\n")
+cat("MAPE:", gbm_mape, "\n")
+cat("MAE:", gbm_mae, "\n")
+
+```
+
+# Fit XGBoost model
+```{r message=FALSE, warning=FALSE}
+
+# Define the training control
+train_control <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Train the XGBoost model using caret
+xgb_model <- train(
+  x = train_df,
+  y = train_df$diamond.price,
+  method = "xgbTree",  # XGBoost method
+  trControl = train_control,
+  metric = "RMSE"
+)
+```
+
+
+```{r}
+# Make predictions
+xgb_predictions <- predict(xgb_model, test_df)
+
+# Evaluate XGBoost model
+xgb_rmse <- sqrt(mean((test_df$diamond.price - xgb_predictions)^2))
+xgb_r_squared <- cor(test_df$diamond.price, xgb_predictions)^2
+xgb_mse <- mean((test_df$diamond.price - xgb_predictions)^2)
+xgb_mae <- mean(abs(test_df$diamond.price - xgb_predictions))
+xgb_mape <-mape(test_df$diamond.price, xgb_predictions)
+# Print out the evaluation metrics for XGBoost
+cat("XGBoost Model Evaluation\n")
+cat("RMSE:", xgb_rmse, "\n")
+cat("R-squared:", xgb_r_squared, "\n")
+cat("MSE:", xgb_mape, "\n")
+cat("MAE:", xgb_mae, "\n")
+
+
+```
+
+# Light GBM
+
+```{r message=FALSE, warning=FALSE}
+
+# Convert data to LightGBM dataset format
+train_data_lg <- lgb.Dataset(data = as.matrix(train_df), label = train_df$diamond.price)
+test_data_lg <- lgb.Dataset(data = as.matrix(test_df), label = test_df$diamond.price)
+
+# Set LightGBM parameters
+params <- list(
+  objective = "regression",
+  metric = "rmse",
+  verbose_eval = -1
+)
+
+# Train the LightGBM model
+lgb_model <- lgb.train(
+  params = params,
+  data = train_data_lg,
+  verbose = -1
+)
+```
+
+```{r}
+
+# Make predictions
+lgb_predictions <- predict(lgb_model, as.matrix(test_df))
+
+# Evaluate LightGBM model
+lgb_rmse <- sqrt(mean((test_df$diamond.price - lgb_predictions)^2))
+lgb_r_squared <- R2(pred = lgb_predictions, obs = test_df$diamond.price)
+lgb_mse <- mean((test_df$diamond.price - lgb_predictions)^2)
+lgb_mae <- mean(abs(test_df$diamond.price - lgb_predictions))
+lgb_mape <-mape(test_df$diamond.price, lgb_predictions)
+# Print out the evaluation metrics for LightGBM
+cat("LightGBM Model Evaluation\n")
+cat("RMSE:", lgb_rmse, "\n")
+cat("R-squared:", lgb_r_squared, "\n")
+cat("MAPE:", lgb_mape, "\n")
+cat("MAE:", lgb_mae, "\n")
+```
+
+
+```{r}
+bart_model_1 = bart2(diamond.price ~., data= train_df, 
+                     test = test_df,
+                   keepTrees = TRUE, seed = 1234 , verbose = FALSE
+                   )
+
+```
+
+```{r}
+# Make predictions on the test data
+bart_predictions_1 <- bart_model_1$yhat.test.mean
+
+# Evaluate Gradient Boosting Machine model
+bart_rmse_1 <- sqrt(mean((test_df$diamond.price - bart_predictions_1)^2))
+bart_r_squared_1 <- R2(pred = bart_predictions_1, obs = test_df$diamond.price)
+bart_mse_1 <- mean((test_df$diamond.price - bart_predictions_1)^2)
+bart_mae_1 <- mean(abs(test_df$diamond.price - bart_predictions_1))
+bart_mape_1 <-mape(test_df$diamond.price, bart_predictions_1)
+# Print out the evaluation metrics for Gradient Boosting Machine
+cat("Bayesian Additive Regression trees\n")
+cat("RMSE:", bart_rmse_1, "\n")
+cat("R-squared:", bart_r_squared_1, "\n")
+cat("MAPE:", bart_mape_1, "\n")
+cat("MAE:", bart_mae_1, "\n")
+
+```
+
+# Incorporating Lag Components for prediction
+
+```{r}
+library(xts)
+
+# Set date column as index
+ts_xts <- xts(ts_df$diamond.price, order.by = ts_df$date)
+
+# Create lag features for time series data
+lags <- 1:5  # Number of lags to consider
+lagged_data <- lag.xts(ts_xts, k = lags)  # Create lagged data
+
+# Combine the lagged features into one data frame
+lagged_df <- data.frame(lagged_data)
+colnames(lagged_df) <- paste0("lag_", lags)  # Rename columns with lag prefixes
+
+# Merge the lagged features with the original data
+final_data <- cbind(ts_df, lagged_df) # Combine data frames
+
+# Remove rows with NAs created by lagging
+final_data <- final_data[complete.cases(final_data), ]
+
+# Split the data into training and testing sets based on dates
+train_data <- final_data[final_data$date <= "2020-04-28", ]
+test_data <- final_data[final_data$date >= "2020-04-29" & final_data$date <= "2021-06-04", ]
+
+# Set date column as index
+rownames(train_data) <- train_data$date
+rownames(test_data) <- test_data$date
+
+# Drop the date column
+train_data$date <- NULL
+test_data$date <- NULL
+ 
+```
+
+
+```{r}
+dim(train_data) 
+```
+
+
+```{r}
+dim(test_data)
+```
+
+# Fit a Random Forest model
+
+### With the defaults
+```{r}
+
+
+rf_model <- randomForest( diamond.price~ ., data = train_data)
+ 
+
+```
+
+```{r}
+# Make predictions on the test data
+predictions_rf <- predict(rf_model, newdata = test_data)
+ 
+# Calculate MAPE function
+mape <- function(actual, forecast) {
+  mean(abs((actual - forecast) / actual)) * 100
+}
+
+# Evaluate the model using RMSE
+rmse_rf <- sqrt(mean((test_data$diamond.price - predictions_rf)^2))
+
+# Calculate R-squared
+r_squared_rf <- R2(pred = predictions_rf, obs = test_data$diamond.price)
+
+# Mean SAbsolute Error percentage
+mape_rf <-mape(test_data$diamond.price, predictions_rf)
+
+# Mean Absolute Error (MAE)
+mae_rf <- mean(abs(test_data$diamond.price - predictions_rf))
+
+# Print out the evaluation metrics
+cat("Random forest: Default\n")
+cat("RMSE:", rmse_rf, "\n")
+cat("R-squared:", r_squared_rf, "\n")
+cat("MAPE:", mape_rf, "\n")
+cat("MAE:", mae_rf, "\n")
+
+```
+
+
+```{r}
+X_train = train_data[ ,-1]
+y_train = train_data[ ,1]
+# Define the grid of parameters to search over
+ntree_values <- 200
+mtry_values <- 3
+
+# Perform the grid search using tuneRF
+tune_results <- tuneRF(X_train, 
+                       y_train, 
+                       ntreeTry = ntree_values, 
+                       mtryTry = mtry_values, 
+                       stepFactor = 1.5)
+```
+
+
+# With Tuned Parameters
+```{r}
+# Train the model with the optimal parameters
+rf_model_2 <- randomForest(diamond.price ~ ., data = train_data, 
+                       mtry = 2, importance=T)
+
+# Make predictions on the test data
+predictions_rf_2 <- predict(rf_model_2, newdata = test_data)
+ 
+# Evaluate the model using RMSE
+rmse_rf_2 <- sqrt(mean((test_data$diamond.price - predictions_rf_2)^2))
+
+# Calculate R-squared
+r_squared_rf_2 <- R2(pred = predictions_rf_2, obs = test_data$diamond.price)
+
+mape_rf_2 <-mape(test_data$diamond.price, predictions_rf_2)
+
+# Mean Absolute Error (MAE)
+mae_rf_2 <- mean(abs(test_data$diamond.price - predictions_rf_2))
+
+# Print out the evaluation metrics
+cat("Random Forest: Tuned\n")
+cat("RMSE:", rmse_rf_2, "\n")
+cat("R-squared:", r_squared_rf_2, "\n")
+cat("MAPE", mape_rf_2, "\n")
+cat("MAE:", mae_rf_2, "\n")
+
+```
+
+
+# Fit XGBoost model 
+
+### With defaults
+
+```{r warning=FALSE}
+control <- trainControl(method = "cv",   # Use cross-validation
+                        number = 10,       # Number of folds
+                        verboseIter = FALSE) 
+
+xgb_model_2 <- caret::train(
+  diamond.price ~ ., 
+  data = train_data, 
+  method = "xgbTree",
+  trControl = control,
+  metric = "RMSE",
+  verbose = FALSE
+)
+```
+
+```{r}
+predictions_xgb_2 <- predict(xgb_model_2, test_data)
+
+# Evaluate XGBoost model
+xgb_rmse_2 <- sqrt(mean((test_data$diamond.price - predictions_xgb_2)^2))
+xgb_r_squared_2 <- R2(pred = predictions_xgb_2, obs = test_data$diamond.price)
+xgb_mse_2 <- mean((test_data$diamond.price - predictions_xgb_2)^2)
+xgb_mae_2 <- mean(abs(test_data$diamond.price - predictions_xgb_2))
+xgb_mape_2 <-mape(test_data$diamond.price, predictions_xgb_2)
+
+# Print out the evaluation metrics for XGBoost
+cat("XGBoost Model Evaluation: Default\n")
+cat("RMSE:", xgb_rmse_2, "\n")
+cat("R-squared:", xgb_r_squared_2, "\n")
+cat("MAPE", xgb_mape_2, "\n")
+cat("MAE:", xgb_mae_2, "\n\n")
+
+```
+
+### withtuning 
+```{r}
+xgb_model_2$bestTune
+```
+
+```{r}
+set.seed(1234)
+xgb_model_3 <- caret::train(
+  diamond.price ~ ., 
+  data = train_data, 
+  method = "xgbTree",
+  trControl = control,
+  metric = "RMSE",
+  verbose = FALSE,
+  tuneGrid= xgb_model_2$bestTune
+)
+```
+
+```{r}
+predictions_xgb_3 <- predict(xgb_model_3, test_data)
+
+# Evaluate XGBoost model
+xgb_rmse_3 <- sqrt(mean((test_data$diamond.price - predictions_xgb_3)^2))
+xgb_r_squared_3 <- R2(pred = predictions_xgb_3, obs = test_data$diamond.price)
+xgb_mse_3 <- mean((test_data$diamond.price - predictions_xgb_3)^2)
+xgb_mae_3 <- mean(abs(test_data$diamond.price - predictions_xgb_3))
+xgb_mape_3 <-mape(test_data$diamond.price, predictions_xgb_3)
+
+# Print out the evaluation metrics for XGBoost
+cat("XGBoost Model Evaluation : Tuned\n")
+cat("RMSE:", xgb_rmse_3, "\n")
+cat("R-squared:", xgb_r_squared_3, "\n")
+cat("MAPE:", xgb_mape_3, "\n")
+cat("MAE:", xgb_mae_3, "\n\n")
+
+```
+
+```{r}
+library(lightgbm)
+
+# Convert data to LightGBM dataset format
+lgb_train <- lgb.Dataset(data = as.matrix(train_data[, -which(names(train_data) == "diamond.price")]), 
+                         label = train_data$diamond.price)
+
+# Set LightGBM parameters
+params <- list(objective = "regression",
+               metric = "rmse",  # You can change the evaluation metric if needed
+               nrounds = 100)
+
+# Train LightGBM model
+lgb_model <- lgb.train(params = params, data = lgb_train, verbose = 0)
+
+```
+
+```{r}
+# Make predictions on the test data
+lgb_predictions <- predict(lgb_model, as.matrix(test_data[, -which(names(test_data) == "diamond.price")]))
+
+# Evaluate LightGBM model
+lgb_rmse <- sqrt(mean((test_data$diamond.price - lgb_predictions)^2))
+lgb_r_squared <- R2(pred = lgb_predictions, obs = test_data$diamond.price)
+lgb_mse <- mean((test_data$diamond.price - lgb_predictions)^2)
+lgb_mae <- mean(abs(test_data$diamond.price - lgb_predictions))
+lgb_mape <-mape(test_data$diamond.price, lgb_predictions)
+# Print out the evaluation metrics for LightGBM
+cat("LightGBM Model Evaluation: Default\n")
+cat("RMSE:", lgb_rmse, "\n")
+cat("R-squared:", lgb_r_squared, "\n")
+cat("MAPE:", lgb_mape, "\n")
+cat("MAE:", lgb_mae, "\n")
+
+```
+
+### with tuning
+
+```{r}
+library(lightgbm)
+
+# Define hyperparameters grid
+hyperparameters <- list(
+  num_leaves = c(10, 20, 30),
+  learning_rate = c(0.1, 0.01),
+  feature_fraction = c(0.8, 0.9),
+  bagging_fraction = c(0.8, 0.9),
+  bagging_freq = c(4, 6),
+  lambda_l1 = c(0, 0.1),
+  lambda_l2 = c(0, 0.1)
+)
+
+# Initialize variables to store best hyperparameters and evaluation metrics
+best_hyperparameters <- NULL
+best_rmse <- Inf
+
+# Perform grid search
+for (i in 1:length(hyperparameters$num_leaves)) {
+  for (j in 1:length(hyperparameters$learning_rate)) {
+    for (k in 1:length(hyperparameters$feature_fraction)) {
+      for (l in 1:length(hyperparameters$bagging_fraction)) {
+        for (m in 1:length(hyperparameters$bagging_freq)) {
+          for (n in 1:length(hyperparameters$lambda_l1)) {
+            for (o in 1:length(hyperparameters$lambda_l2)) {
+              
+              # Set current hyperparameters
+              params <- list(
+                objective = "regression",
+                metric = "rmse",
+                nrounds = 100,
+                num_leaves = hyperparameters$num_leaves[i],
+                learning_rate = hyperparameters$learning_rate[j],
+                feature_fraction = hyperparameters$feature_fraction[k],
+                bagging_fraction = hyperparameters$bagging_fraction[l],
+                bagging_freq = hyperparameters$bagging_freq[m],
+                lambda_l1 = hyperparameters$lambda_l1[n],
+                lambda_l2 = hyperparameters$lambda_l2[o]
+              )
+              
+              # Train LightGBM model
+              lgb_model <- lgb.train(params = params, data = lgb_train, verbose = 0)
+              
+              # Make predictions on the test data
+              lgb_predictions <- predict(lgb_model, as.matrix(test_data[, -which(names(test_data) == "diamond.price")]))
+              
+              # Evaluate LightGBM model
+              lgb_rmse <- sqrt(mean((test_data$diamond.price - lgb_predictions)^2))
+              
+              # Check if current hyperparameters result in a better RMSE
+              if (lgb_rmse < best_rmse) {
+                best_rmse <- lgb_rmse
+                best_hyperparameters <- params
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+```
+```{r}
+# Print out the best hyperparameters and evaluation metrics
+cat("Best Hyperparameters:\n")
+print(best_hyperparameters)
+cat("Best RMSE:", best_rmse, "\n")
+
+```
+
+
+```{r}
+library(lightgbm)
+
+# Set the hyperparameters
+params <- list(
+  objective = "regression",
+  metric = "rmse",
+  nrounds = 100,
+  num_leaves = 10,
+  learning_rate = 0.1,
+  feature_fraction = 0.8,
+  bagging_fraction = 0.8,
+  bagging_freq = 6,
+  lambda_l1 = 0,
+  lambda_l2 = 0.1
+)
+
+# Train LightGBM model
+lgb_model <- lgb.train(params = params, data = lgb_train, verbose = 0)
+
+```
+
+
+```{r}
+# Make predictions on the test data
+lgb_predictions <- predict(lgb_model, as.matrix(test_data[, -which(names(test_data) == "diamond.price")]))
+
+# Evaluate LightGBM model
+lgb_rmse <- sqrt(mean((test_data$diamond.price - lgb_predictions)^2))
+lgb_r_squared <- R2(pred = lgb_predictions, obs = test_data$diamond.price)
+lgb_mse <- mean((test_data$diamond.price - lgb_predictions)^2)
+lgb_mae <- mean(abs(test_data$diamond.price - lgb_predictions))
+lgb_mape <-mape(test_data$diamond.price, lgb_predictions)
+# Print out the evaluation metrics for LightGBM
+cat("LightGBM Model Evaluation:\n")
+cat("RMSE:", lgb_rmse, "\n")
+cat("R-squared:", lgb_r_squared, "\n")
+cat("MAPE:", lgb_mape, "\n")
+cat("MAE:", lgb_mae, "\n")
+
+```
+
+# Gradient Boosting Machines
+# With defaults
+
+```{r}
+set.seed(1234)
+brt_model <- caret::train(
+  diamond.price ~ ., 
+  data = train_data, 
+  method = "gbm",
+  trControl = control,
+  metric = "RMSE",
+  verbose = FALSE
+)
+```
+
+```{r}
+# Make predictions on the test data
+predictions_brt_1 <- predict(brt_model, test_data)
+
+# Evaluate GBM model
+gbm_rmse <- sqrt(mean((test_data$diamond.price - predictions_brt_1)^2))
+gbm_r_squared <- R2(pred = predictions_brt_1, obs = test_data$diamond.price)
+gbm_mse <- mean((test_data$diamond.price - predictions_brt_1)^2)
+gbm_mae <- mean(abs(test_data$diamond.price - predictions_brt_1))
+gbm_mape <- mape(test_data$diamond.price, predictions_brt_1)
+# Print out the evaluation metrics for LightGBM
+cat("GBM Model Evaluation: Default\n")
+cat("RMSE:", gbm_rmse, "\n")
+cat("R-squared:", gbm_r_squared, "\n")
+cat("MAPE:", gbm_mape, "\n")
+cat("MAE:", gbm_mae, "\n")
+```
+
+# Tuning
+
+```{r warning=FALSE}
+gbmGrid <-  expand.grid(interaction.depth = c(1, 5, 9), 
+                        n.trees = (1:30)*50, 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 20)
+                        
+set.seed(1234)
+gbm_model_2 <- train(diamond.price ~ ., data = train_data, 
+                 method = "gbm", 
+                 trControl = control, 
+                 verbose = FALSE, 
+                 tuneGrid = gbmGrid)
+#plot(fit_gbm_2)
+gbm_model_2$bestTune
+```
+
+```{r}
+set.seed(1234)
+gbm_model_3 <- train(diamond.price ~ ., data = train_data, 
+                 method = "gbm", 
+                 trControl = control, 
+                 verbose = FALSE, 
+                 tuneGrid = gbm_model_2$bestTune)
+```
+
+```{r}
+# Make predictions on the test data
+predictions_brt_3 <- predict(gbm_model_3, test_data)
+
+# Evaluate GBM model
+gbm_rmse_3 <- sqrt(mean((test_data$diamond.price - predictions_brt_3)^2))
+gbm_r_squared_3 <- R2(pred = predictions_brt_3, obs = test_data$diamond.price)
+gbm_mse_3 <- mean((test_data$diamond.price - predictions_brt_3)^2)
+gbm_mae_3 <- mean(abs(test_data$diamond.price - predictions_brt_3))
+gbm_mape_3 <- mape(test_data$diamond.price, predictions_brt_3)
+# Print out the evaluation metrics for LightGBM
+cat("GBM Model Evaluation: Tuned\n")
+cat("RMSE:", gbm_rmse_3, "\n")
+cat("R-squared:", gbm_r_squared_3, "\n")
+cat("MAPE:",gbm_mape_3 , "\n")
+cat("MAE:", gbm_mae_3, "\n")
+```
+
+
+# Bayesian Additive Regression Trees
+```{r}
+bart_model = bart2(diamond.price ~., data= train_data, test = test_data,
+                   keepTrees = TRUE, seed = 1234 , verbose = FALSE)
+
+```
+
+```{r}
+# Make predictions on the test data
+bart_predictions <- bart_model$yhat.test.mean
+
+# Evaluate Gradient Boosting Machine model
+bart_rmse <- sqrt(mean((test_data$diamond.price - bart_predictions)^2))
+bart_r_squared <- R2(pred = bart_predictions, obs = test_data$diamond.price)
+bart_mse <- mean((test_data$diamond.price - bart_predictions)^2)
+bart_mae <- mean(abs(test_data$diamond.price - bart_predictions))
+bart_mape <- mape(test_data$diamond.price, bart_predictions)
+# Print out the evaluation metrics for Gradient Boosting Machine
+cat("Bayesian Additive Regression trees: Default\n")
+cat("RMSE:", bart_rmse, "\n")
+cat("R-squared:", bart_r_squared, "\n")
+cat("MAPE:", bart_mape, "\n")
+cat("MAE:", bart_mae, "\n")
+
+```
+
+# Tuning k with xbart
+
+```{r}
+cv = xbart( diamond.price~., data= train_data, 
+            k = seq(3,5, .2), seed = 1234)
+cv_mean = apply(cv, 2,mean)
+cv_mean[cv_mean == min(cv_mean)]
+```
+
+$k$ should be set to 5
+
+```{r}
+bart_model_2 = bart2(diamond.price ~., data= train_data, test = test_data,
+                   keepTrees = TRUE, seed = 1234 , verbose = FALSE,
+                   k= 5,  n.samples = 5000L, n.trees = 500 )
+
+```
+
+```{r}
+# Make predictions on the test data
+bart_predictions_2 <- bart_model_2$yhat.test.mean
+
+# Evaluate Gradient Boosting Machine model
+bart_rmse_2 <- sqrt(mean((test_data$diamond.price - bart_predictions_2)^2))
+bart_r_squared_2 <- R2(pred = bart_predictions_2, obs = test_data$diamond.price)
+bart_mse_2 <- mean((test_data$diamond.price - bart_predictions_2)^2)
+bart_mae_2 <- mean(abs(test_data$diamond.price - bart_predictions_2))
+bart_mape_2 <- mape(test_data$diamond.price, bart_predictions_2)
+# Print out the evaluation metrics for BART
+cat("Bayesian Additive Regression trees: Tuned\n")
+cat("RMSE:", bart_rmse_2, "\n")
+cat("R-squared:", bart_r_squared_2, "\n")
+cat("MAPE:", bart_mape_2, "\n")
+cat("MAE:", bart_mae_2, "\n")
+
+```
+
+```{r}
+# Get variable importance
+importance <- xgb.importance(model = xgb_model_2$finalModel, data = train_data)
+
+xgb.plot.importance(importance_matrix=importance, main="XG Boost Variable Importance")
+
+# Sort the importance data frame by Importance in ascending order
+importance_sorted <- importance[order(importance$Importance), ]
+
+
+# Reorder the levels of the Feature factor based on Importance values
+importance_sorted$Feature <- factor(importance_sorted$Feature, levels = importance_sorted$Feature)
+
+# Create the plot with sorted variables on the y-axis
+ggplot(importance_sorted, aes(x = Importance, y = Feature)) +
+  geom_bar(stat = "identity", fill = "gray") +
+  labs(title = "XG Boost Feature Importance",
+       x = "Importance",
+       y = "Feature") +
+  theme_classic() +
+  theme(axis.text.y = element_text(size = 10),  # Adjust text size
+        panel.grid.major.y = element_blank(),   # Remove vertical grid lines
+        panel.grid.major.x = NULL)+  # Remove horizontal grid lines
+  xlim(0,0.8)
+
+```
+
+
+
+```{r}
+variable_names <- rownames(rf_model$importance)
+importance_values <- rf_model_2$importance[, "IncNodePurity"] / sum(rf_model_2$importance[, "IncNodePurity"])  # Using %IncMSE for importance
+
+# Arrange variables by ascending importance
+sorted_indices <- order(importance_values)
+sorted_variable_names <- variable_names[sorted_indices]
+sorted_importance_values <- importance_values[sorted_indices]
+
+# Create a data frame for ggplot
+data <- data.frame(variable = factor(sorted_variable_names, levels = sorted_variable_names), importance = sorted_importance_values)
+
+# Create the plot
+ggplot(data, aes(x = importance, y = variable)) +
+  geom_bar(stat = "identity", fill = "gray") +
+  labs(title = "Random Forest Variable Importance",
+       x = "Gini importance",
+       y = "Feature") +
+  theme_classic() +
+ # theme(axis.text.y = element_text(size = 10),  # Adjust text size
+   #     plot.title = element_text(hjust = 0.5),  # Center the title
+    #    panel.grid.major.y = element_blank(),   # Remove vertical grid lines
+    #    panel.grid.major.x = NULL)+  # Remove horizontal grid lines
+      xlim(0,0.25)
+```
+
+
+
+```{r}
+x =bart_model_2$varcount
+# Calculate the average across all 4 chains
+average_across_chains <- apply(x, c(2, 3), mean)
+
+# Check the dimensions of the resulting averaged data
+dim(average_across_chains)
+
+percount20 = average_across_chains/apply(average_across_chains,1,sum)
+mvp20 = apply(percount20,2,mean)
+qm = apply(percount20,2,quantile,probs=c(.05,.95))
+p = ncol(train_data[,-1])
+rgy = range(qm)
+
+plot(c(1,p),rgy,type="n",xlab="Variables",ylab="post mean, percent var use",axes=FALSE, main="BART Variable Importance")
+axis(1, at = 1:p, labels = names(mvp20), cex.lab = 0.7, cex.axis = 0.7, las = 2)  # Rotate x-axis labels by 45 degrees
+axis(2, cex.lab = 1.2, cex.axis = 1.2, las =1)
+lines(1:p, mvp20, col = "black", lty = 4, pch = 4, type = "b", lwd = 1.5)
+
+for(i in 1:p) {
+  lines(c(i,i), qm[,i], col = "blue", lty = 3, lwd = 1.0)
+}
+
+
+```
+
+
+```{r}
+# Arrange variables by ascending importance
+sorted_indices <- order(mvp20)
+sorted_variable_names <- names(mvp20)[sorted_indices]
+sorted_importance_values <- mvp20[sorted_indices]
+
+# Create a data frame for ggplot
+data <- data.frame(variable = factor(sorted_variable_names, levels = sorted_variable_names), importance = sorted_importance_values)
+
+# Create the plot
+ggplot(data, aes(x = importance, y = variable)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  labs(title = "BART Feature Importance",
+       x = "Inclusion proportion",
+       y = "Feature") +
+  theme_classic()
+
+```
+
+
+```{r}
+library(tibble)
+predictions_rf_up <- unname(predictions_rf)
+predictions <- bind_cols(predictions_rf_up, bart_predictions_2)
+
+# Rename columns
+names(predictions) <- c("predicted_value_rf", "predicted_value_bart")
+
+# Merge predictions with test_data based on the date column
+combined_data <- cbind(predictions,test_data)
+combined_data <- rownames_to_column(combined_data, var = "date")
+combined_data$date <- as.Date(combined_data$date)
+
+
+# Plot combined data
+ggplot(combined_data, aes(x = date)) +
+  geom_line(aes(y = diamond.price, color = "Actual"), linetype = "solid") +
+  geom_line(aes(y = predicted_value_rf, color = "RF Prediction"), linetype = "dashed") +
+  geom_line(aes(y = predicted_value_bart, color = "BART Prediction"), linetype = "dashed") +
+  labs(x = "Date", y = "Diamond price", title = "Diamond Price Prediction on Test Set") +
+  theme_minimal() +
+  scale_x_date(limit = as.Date(c("2020-04-28", "2021-06-04"))) +
+  scale_color_manual(name = "", # Remove the legend title
+                     values = c("Actual" = "black", "RF Prediction" = "red", "BART Prediction" = "blue"),
+                     labels = c("Actual", "RF Prediction", "BART Prediction")) +
+  theme(legend.position = "top") #+ ylim(9000,11000)
+```

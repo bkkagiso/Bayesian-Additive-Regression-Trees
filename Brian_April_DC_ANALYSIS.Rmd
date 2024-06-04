@@ -1,0 +1,1057 @@
+---
+title: "Diamond Price Prediction- Thesis"
+author: "Brian K.April"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Kaggle's Diamond dataset is a collection of data on the physical attributes and characteristics of diamonds, including the diamond's price, carat weight, color, clarity, and cut. 
+
+The columns in the Diamonds dataset include:
+
+- price: The price of the diamond in US dollars (326-18,823)
+
+- carat: The weight of the diamond, measured in carats (0.2--5.01)
+
+- cut: The quality of the diamond cut, with categories including "Ideal", "Premium", "Very Good", "Good", and "Fair".
+
+- color: The color of the diamond from J (worst) to D (best)
+
+- clarity: The clarity of the diamond (I1 (worst), SI2, SI1, VS2, VS1, VVS2, VVS1, IF (best))
+
+- x length in mm (0--10.74)
+
+- y width in mm (0--58.9)
+
+- z depth in mm (0--31.8)
+
+- depth: The depth of the diamond, expressed as a percentage of the total width, z / mean(x, y) = 2 * z / (x + y) (43--79)
+
+- table: The width of the diamond's top surface, expressed as a percentage of the total width (43--95)
+
+```{r message=FALSE}
+
+library('randomForest')
+library('lattice')
+library('ggplot2')
+library('caret')
+library('dplyr')
+library('corrplot')
+library("e1071")
+library("tictoc")
+library("lightgbm")
+library("dbarts")
+```
+
+```{r}
+setwd("/home/student23/Thesis")
+#diamonds_df = read.csv("diamonds.csv")
+diamonds_df <- read.csv("diamonds.csv")
+diamonds_df <- diamonds_df[, -1] 
+head(diamonds_df)
+summary(diamonds_df)
+```
+
+```{r}
+dim(diamonds_df)
+```
+
+```{r}
+str(diamonds_df)
+```
+
+```{r}
+library(dplyr)
+xyzZero = filter(diamonds_df, x == 0 | y == 0 | z == 0)
+xyzZero
+```
+
+
+```{r}
+diamonds_df <- anti_join(diamonds_df, xyzZero)
+dim(diamonds_df)
+```
+
+# Checking for Missing Values
+
+```{r}
+
+check_missing_values <- function(data) {
+  missing_count <- colSums(is.na(data))
+  missing_columns <- names(missing_count)[missing_count > 0]
+  
+  if(length(missing_columns) > 0) {
+    cat("Missing values found in the following columns:\n")
+    print(missing_columns)
+  } else {
+    cat("No missing values found in the dataframe.\n")
+  }
+}
+
+check_missing_values(diamonds_df)
+```
+
+# Checking for duplicate rows
+
+```{r}
+duplicate_rows <- diamonds_df[duplicated(diamonds_df), ]
+print(duplicate_rows)
+```
+
+# Removing duplicate rows
+```{r}
+diamonds_df = unique(diamonds_df)
+duplicate_rows <- diamonds_df[duplicated(diamonds_df), ]
+print(duplicate_rows)
+```
+
+
+```{r}
+summary(diamonds_df)
+```
+
+
+```{r}
+# Compute proportions for 'cut'
+cut_proportions <- prop.table(table(diamonds_df$cut))
+
+# Compute proportions for 'color'
+color_proportions <- prop.table(table(diamonds_df$color))
+
+# Compute proportions for 'clarity'
+clarity_proportions <- prop.table(table(diamonds_df$clarity))
+
+# Print the proportions
+cat("Proportions for Cut:")
+print(cut_proportions)
+
+cat("\nProportions for Color:")
+print(color_proportions)
+
+cat("\nProportions for Clarity:\n")
+print(clarity_proportions)
+
+```
+
+
+```{r}
+# Create the scatter plot with adjusted y-axis limit
+ggplot(data = diamonds_df, aes(x = carat, y = price, color = cut)) +
+  geom_point(size = 0.8) +
+  scale_color_brewer(palette = "Dark2") +  # Use a dull color palette
+  labs(title = "Distribution of Price vs. Carat by Cut",
+       x = "Carat",
+       y = "Diamond Price") +
+  theme_classic() + ylim(0,20000)
+
+
+```
+
+
+
+# Data Encoding
+```{r}
+# Convert 'cut' column to numerical representation
+diamonds_df$cut <- as.numeric(factor(diamonds_df$cut,
+                  levels = c("Fair", "Good", "Very Good", "Premium", "Ideal")))
+
+# Convert 'color' column to numerical representation
+diamonds_df$color <- as.numeric(factor(diamonds_df$color,
+                    levels = c("D", "E", "F", "G", "H", "I", "J")))
+
+# Convert 'clarity' column to numerical representation
+diamonds_df$clarity <- as.numeric(factor(diamonds_df$clarity,
+                    levels = c("FL", "IF", "VVS1", "VVS2", "VS1", 
+                               "VS2", "SI1", "SI2", "I1", "I2", "I3")))
+diamonds_df$price = as.numeric(diamonds_df$price)
+
+# Check the class of each column
+sapply(diamonds_df, class)
+
+```
+
+# Data Re-shuffling
+
+```{r}
+diamonds_df <-  diamonds_df[sample(nrow(diamonds_df)), ]
+head(diamonds_df,8)
+```
+
+## Correlation analysis (Continous Variables)
+
+```{r}
+
+M <- cor(diamonds_df[, -c(2,3,4)])
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(M, method = "number", type = "upper", tl.col = "black", tl.srt = 30, 
+         tl.cex = 0.9)
+
+```
+
+
+# Data splitting
+```{r}
+set.seed(123)
+index <- createDataPartition(diamonds_df$price, p = 0.8, list = FALSE)
+train_set <- diamonds_df[index, ]
+test_set <- diamonds_df[-index, ]
+
+cat("Dimensions of X_train:", dim(train_set), "\n")
+cat("Dimensions of X_test:", dim(test_set), "\n")
+```
+
+
+# MODEL FITTING
+
+We consider, 
+
+1. Random Forest,
+
+2. Boosted Regression trees,
+
+3. Bayesian Additive Regression Trees,
+
+4. XG Boost
+
+5. LightGB
+
+## Setting up Cross Validations
+```{r}
+ctrl <- trainControl(method = "cv",     # Cross-validation
+                     number = 10,        # -fold cross-validation
+                     verboseIter = FALSE 
+                     )
+```
+
+## Boosted Regression Trees  
+```{r message=FALSE, warning=FALSE}
+tic()
+
+set.seed(1234)
+brt_fit <- caret::train(
+  price ~ ., 
+  data = train_set, 
+  method = "gbm",
+  trControl = ctrl,
+  metric = "RMSE",
+  verbose = FALSE
+)
+toc()
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_brt <- predict(brt_fit, test_set)
+
+# Carry out model evaluations
+n= nrow(test_set)
+p=ncol(test_set)
+#RMSE
+RMSE_brt <- RMSE(predictions_brt , test_set$price)
+#R-squared
+R_sqd_brt <- caret::R2(predictions_brt , test_set$price)
+#Adjusted R2
+adj_R_brt <- 1 - ((1 - R_sqd_brt) * (n - 1) / (n - p - 1))
+
+#MSE
+MSE_brt <-  mean((predictions_brt - test_set$price)^2)
+#MAE
+MAE_brt <- caret::MAE(predictions_brt , test_set$price)
+
+
+cat(paste0("R2: ", R_sqd_brt))
+cat(paste0("\nAdj R2: ", adj_R_brt))
+cat(paste0("\nRMSE: ", RMSE_brt))
+cat(paste0("\nMSE: ", MSE_brt))
+cat(paste0("\nMAE: ", MAE_brt))
+
+```
+
+```{r}
+gbmGrid <-  expand.grid(interaction.depth = c(1, 5, 9), 
+                        n.trees = (1:30)*50, 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 20)
+                        
+set.seed(1234)
+fit_gbm_2 <- train(price ~ ., data = train_set, 
+                 method = "gbm", 
+                 trControl = ctrl, 
+                 verbose = FALSE, 
+                 tuneGrid = gbmGrid)
+#plot(fit_gbm_2)
+fit_gbm_2$bestTune
+```
+
+## Boosted Regression Trees after Tuning using GridSearch
+
+```{r}
+set.seed(1234)
+tic()
+
+fit_gbm_tuned <- train(price ~ ., data = train_set, 
+                 method = "gbm", 
+                 trControl = ctrl, 
+                 verbose = FALSE, 
+                 tuneGrid = fit_gbm_2$bestTune)
+toc()
+
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_brtt <- predict(fit_gbm_tuned, test_set)
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_brtt <- RMSE(predictions_brtt , test_set$price)
+#R-squared
+R_sqd_brtt <- caret::R2(predictions_brtt , test_set$price)
+#Adjusted R2
+adj_R_brtt <- 1 - ((1 - R_sqd_brtt) * (n - 1) / (n - p - 1))
+#MSE
+#MSE
+MSE_brtt <-  mean((predictions_brtt - test_set$price)^2)
+#MAE
+MAE_brtt <- caret::MAE(predictions_brtt , test_set$price)
+
+cat(paste0("R2: ", R_sqd_brtt))
+cat(paste0("\nAdj R2: ", adj_R_brtt))
+cat(paste0("\nRMSE: ", RMSE_brtt))
+cat(paste0("\nMSE: ", MSE_brtt))
+cat(paste0("\nMAE: ", MAE_brtt))
+
+
+```
+
+## Bayesian Additive regression trees
+
+```{r}
+X <- diamonds_df %>% 
+  select(carat, depth, table, x, y, z, clarity, cut, color)
+y <- diamonds_df$price
+
+X_train = X[index,]
+X_test = X[-index,]
+y_train <- y[index]
+y_test<-y[-index]
+
+```
+
+## Fitting with the defaults
+```{r}
+tic()
+fit_bart1 = bart2(price~., data= train_set, test = test_set, keepTrees = TRUE,
+                  seed = 1234 , verbose = FALSE)
+
+y_actual = y_test 
+y_pred = fit_bart1$yhat.test.mean
+
+toc()
+```
+
+```{r}
+# Make predictions on the test data
+predictions_bart_1 <- fit_bart1$yhat.test.mean
+
+# Carry out model evaluations
+# Calculate adjusted R-squared
+n <- nrow(test_set)
+p <- ncol(test_set)  # Number of predictors (excluding the intercept)
+
+##RMSE
+RMSE_bart1 <- RMSE(predictions_bart_1 , test_set$price)
+#R-squared
+R_sqd_bart1 <- caret::R2(predictions_bart_1 , test_set$price)
+#Adjusted R2
+adj_R_bart1 <- 1 - ((1 - R_sqd_bart1) * (n - 1) / (n - p - 1))
+#MSE
+MSE_bart1 <-  mean((predictions_bart_1 - test_set$price)^2)
+#MAE
+MAE_bart1 <- caret::MAE(predictions_bart_1 , test_set$price)
+
+cat(paste0("R2: ", R_sqd_bart1))
+cat(paste0("\nAdj R2: ", adj_R_bart1))
+cat(paste0("\nRMSE: ", RMSE_bart1))
+cat(paste0("\nMSE: ", MSE_bart1))
+cat(paste0("\nMAE: ", MAE_bart1))
+
+```
+
+```{r}
+cv = xbart(price~., data= train_set, 
+            k = seq(3,5, .2), seed = 1234)
+cv_mean = apply(cv, 2,mean)
+cv_mean[cv_mean == min(cv_mean)]
+```
+
+
+
+```{r}
+tic()
+
+fit_bart2 = bart2(price~., data= train_set, test = test_set, keepTrees = TRUE,
+                 n.samples = 2000L, seed = 1234 , verbose = FALSE,
+                 k=4.2, n.trees = 500)
+
+toc()
+
+```
+
+
+```{r}
+y_actual = y_test 
+predictions_bart_2 = fit_bart2$yhat.test.mean
+# Carry out model evaluations
+
+# Calculate adjusted R-squared
+n <- nrow(test_set)
+p <- ncol(test_set)  # Number of predictors (excluding the intercept)
+##RMSE
+RMSE_bart2 <- RMSE(predictions_bart_2 , test_set$price)
+#R-squared
+R_sqd_bart2 <- caret::R2(predictions_bart_2 , test_set$price)
+#Adjusted R2
+adj_R_bart2 <- 1 - ((1 - R_sqd_bart2) * (n - 1) / (n - p - 1))
+#MSE
+MSE_bart2 <-  mean((predictions_bart_2 - test_set$price)^2)
+#MAE
+MAE_bart2 <- caret::MAE(predictions_bart_2 , test_set$price)
+
+# Print out results
+cat(paste0("R2: ", R_sqd_bart2))
+cat(paste0("\nAdjusted R2: ", adj_R_bart2))
+cat(paste0("\nRMSE: ", RMSE_bart2))
+cat(paste0("\nMSE: ", MSE_bart2))
+cat(paste0("\nMAE: ", MAE_bart2))
+
+```
+
+## Random Forest
+
+```{r}
+tic()
+
+fit_RF <- randomForest(price~., data = train_set)
+
+toc()
+
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_rf1 <- predict(fit_RF, test_set)
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_rf1 <- RMSE(predictions_rf1 , test_set$price)
+#R-squared
+R_sqd_rf1 <- caret::R2(predictions_rf1 , test_set$price)
+#Adjusted R2
+adj_R_rf1 <- 1 - ((1 - R_sqd_rf1) * (n - 1) / (n - p - 1))
+#MSE
+MSE_rf1 <-  mean((predictions_rf1 - test_set$price)^2)
+#MAE
+MAE_rf1 <- caret::MAE(predictions_rf1 , test_set$price)
+
+cat(paste0("R2: ", R_sqd_rf1))
+cat(paste0("\nAdj R2: ", adj_R_rf1))
+cat(paste0("\nRMSE: ", RMSE_rf1))
+cat(paste0("\nMSE: ", MSE_rf1))
+cat(paste0("\nMAE: ", MAE_rf1))
+
+```
+
+## Tuning for Random Forest
+
+```{r}
+# Define the grid of parameters to search over
+ntree_values <- 200
+mtry_values <- 2
+tic()
+# Perform the grid search using tuneRF
+tune_results <- tuneRF(X_train, 
+                       y_train, 
+                       ntreeTry = ntree_values, 
+                       mtryTry = mtry_values, 
+                       stepFactor = 1.5)
+
+# Access the optimal parameters found
+#optimal_ntree <- tune_results$ntree
+#optimal_mtry <- tune_results$mtry
+```
+
+```{r}
+tic()
+# Train the model with the optimal parameters
+fit_RF_2 <- randomForest(price ~ ., data = train_set, 
+                       mtry = 4)
+toc()
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_rf_tuned <- predict(fit_RF_2, test_set)
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_rf_2 <- RMSE(predictions_rf_tuned , test_set$price)
+#R-squared
+R_sqd_rf_2 <- caret::R2(predictions_rf_tuned , test_set$price)
+#Adjusted R2
+adj_R_rf2 <- 1 - ((1 - R_sqd_rf_2) * (n - 1) / (n - p - 1))
+#MSE
+MSE_rf_2 <-  mean((predictions_rf_tuned - test_set$price)^2)
+#MAE
+MAE_rf_2 <- caret::MAE(predictions_rf_tuned , test_set$price)
+
+cat(paste0("R2: ", R_sqd_rf_2))
+cat(paste0("\nAdj R2: ", adj_R_rf2))
+cat(paste0("\nRMSE: ", RMSE_rf_2))
+cat(paste0("\nMSE: ", MSE_rf_2))
+cat(paste0("\nMAE: ", MAE_rf_2))
+
+```
+
+# Extreme Gradient Boosting
+## with defaults
+
+```{r warning=FALSE, include=FALSE}
+tic()
+
+
+fit_xgb <- caret::train(
+  price ~ ., 
+  data = train_set, 
+  method = "xgbTree",
+  trControl = ctrl,
+  metric = "RMSE",
+  verbose = FALSE
+)
+
+toc()
+#336.658 sec elapsed
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_xgb <- predict(fit_xgb, test_set)
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_xgb <- RMSE(predictions_xgb , test_set$price)
+#R-squared
+R_sqd_xgb <- caret::R2(predictions_xgb , test_set$price)
+#Adjusted R2
+adj_R_xgb <- 1 - ((1 - R_sqd_xgb) * (n - 1) / (n - p - 1))
+#MSE
+MSE_xgb <-  mean((predictions_xgb - test_set$price)^2)
+#MAE
+MAE_xgb <- caret::MAE(predictions_xgb , test_set$price)
+
+cat(paste0("\nR2: ", R_sqd_xgb))
+cat(paste0("\nAdj R2: ", adj_R_xgb))
+cat(paste0("\nRMSE: ", RMSE_xgb))
+cat(paste0("\nMSE: ", MSE_xgb))
+cat(paste0("\nMAE: ", MAE_xgb))
+```
+
+```{r include=FALSE}
+tic()
+
+fit_xgb2 <- caret::train(
+  price ~ ., 
+  data = train_set, 
+  method = "xgbTree",
+  trControl = ctrl,
+  metric = "RMSE",
+  verbose = FALSE,
+  tuneGrid= fit_xgb$bestTune
+)
+
+toc()
+#9.938 sec elapsed
+
+```
+
+```{r}
+# Make predictions on the test data
+predictions_xgb2 <- predict(fit_xgb2, test_set)
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_xgb2 <- RMSE(predictions_xgb2 , test_set$price)
+#R-squared
+R_sqd_xgb2 <- caret::R2(predictions_xgb2 , test_set$price)
+#Adj R
+adj_R_xgb2 <- 1 - ((1 - R_sqd_xgb2) * (n - 1) / (n - p - 1))
+#MSE
+MSE_xgb2 <-  mean((predictions_xgb2 - test_set$price)^2)
+#MAE
+MAE_xgb2 <- caret::MAE(predictions_xgb2 , test_set$price)
+
+cat(paste0("\nR2: ", R_sqd_xgb2))
+cat(paste0("\nR2: ", adj_R_xgb2))
+cat(paste0("\nRMSE: ", RMSE_xgb2))
+cat(paste0("\nMSE: ", MSE_xgb2))
+cat(paste0("\nMAE: ", MAE_xgb2))
+
+```
+
+# LightGBM
+```{r}
+# Convert the datasets to LightGBM format
+lgb_train <- lgb.Dataset(data = as.matrix(X_train), label = y_train)
+lgb_eval <- lgb.Dataset(data = as.matrix(X_test), label = y_test, reference = lgb_train)
+
+tic()
+
+# Train the LightGBM model with default parameters
+fit_lgbm_1 <- lgb.train(
+  data = lgb_train,           # Training data
+  valids = list(test = lgb_eval),  # Validation data
+  nrounds = 100,              # Number of boosting iterations (adjust as needed)
+  early_stopping_rounds = 10,
+  verbose = 0,obj = 'regression'
+)
+toc()
+#0.498 sec elapsed
+
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_lgbm_1 <- predict(fit_lgbm_1, as.matrix(X_test))
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_lgb_1 <- RMSE(predictions_lgbm_1 , test_set$price)
+#R-squared
+R_sqd_lgb_1 <- caret::R2(predictions_lgbm_1 ,test_set$price)
+#Adj R
+adj_R_lgb_1 <- 1 - ((1 - R_sqd_lgb_1) * (n - 1) / (n - p - 1))
+#MSE
+MSE_lgb_1 <-  mean((predictions_lgbm_1 - test_set$price)^2)
+#MAE
+MAE_lgb_1 <- caret::MAE(predictions_lgbm_1 , test_set$price)
+
+cat(paste0("R2: ", R_sqd_lgb_1))
+cat(paste0("\nAdj R: ", adj_R_lgb_1))
+cat(paste0("\nRMSE: ", RMSE_lgb_1))
+cat(paste0("\nMSE: ", MSE_lgb_1))
+cat(paste0("\nMAE: ", MAE_lgb_1))
+
+```
+
+# Grid tuning 
+```{r}
+
+# Define hyperparameters grid
+hyperparameters <- list(
+  num_leaves = c(10, 20, 30),
+  learning_rate = c(0.1, 0.01),
+  feature_fraction = c(0.8, 0.9),
+  bagging_fraction = c(0.8, 0.9),
+  bagging_freq = c(4, 6),
+  lambda_l1 = c(0, 0.1),
+  lambda_l2 = c(0, 0.1)
+)
+
+# Initialize variables to store best hyperparameters and evaluation metrics
+best_hyperparameters <- NULL
+best_rmse <- Inf
+
+# Perform grid search
+for (i in 1:length(hyperparameters$num_leaves)) {
+  for (j in 1:length(hyperparameters$learning_rate)) {
+    for (k in 1:length(hyperparameters$feature_fraction)) {
+      for (l in 1:length(hyperparameters$bagging_fraction)) {
+        for (m in 1:length(hyperparameters$bagging_freq)) {
+          for (n in 1:length(hyperparameters$lambda_l1)) {
+            for (o in 1:length(hyperparameters$lambda_l2)) {
+              
+              # Set current hyperparameters
+              params <- list(
+                objective = "regression",
+                metric = "rmse",
+                nrounds = 100,
+                num_leaves = hyperparameters$num_leaves[i],
+                learning_rate = hyperparameters$learning_rate[j],
+                feature_fraction = hyperparameters$feature_fraction[k],
+                bagging_fraction = hyperparameters$bagging_fraction[l],
+                bagging_freq = hyperparameters$bagging_freq[m],
+                lambda_l1 = hyperparameters$lambda_l1[n],
+                lambda_l2 = hyperparameters$lambda_l2[o]
+              )
+              
+              # Train LightGBM model
+              lgb_model <- lgb.train(params = params, data = lgb_train, verbose = 0)
+              
+              # Make predictions on the test data
+              lgb_predictions <- predict(lgb_model, as.matrix(test_set[, -which(names(test_set) == "price")]))
+              
+              # Evaluate LightGBM model
+              lgb_rmse <- sqrt(mean((test_set$price- lgb_predictions)^2))
+              
+              # Check if current hyperparameters result in a better RMSE
+              if (lgb_rmse < best_rmse) {
+                best_rmse <- lgb_rmse
+                best_hyperparameters <- params
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+```
+
+```{r}
+
+# Print out the best hyperparameters and evaluation metrics
+cat("Best Hyperparameters:\n")
+print(best_hyperparameters)
+cat("Best RMSE:", best_rmse, "\n")
+
+```
+
+
+```{r}
+
+# Set the hyperparameters
+params <- list(
+  objective = "regression",
+  metric = "rmse",
+  nrounds = 100,
+  num_leaves = 30,
+  learning_rate = 0.01,
+  feature_fraction = 0.8,
+  bagging_fraction = 0.8,
+  bagging_freq = 6,
+  lambda_l1 = 0.1,
+  lambda_l2 = 0
+)
+tic()
+# Train LightGBM model
+fit_lgbm <- lgb.train(params = params, data = lgb_train, verbose = 0)
+toc()
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions_lgbm <- predict(fit_lgbm, as.matrix(X_test))
+
+# Carry out model evaluations
+
+#RMSE
+RMSE_lgb <- RMSE(predictions_lgbm , test_set$price)
+#R-squared
+R_sqd_lgb <- caret::R2(predictions_lgbm ,test_set$price)
+#Adj R
+adj_R_lgb <- 1 - ((1 - R_sqd_lgb) * (n - 1) / (n - p - 1))
+#MSE
+MSE_lgb <-  mean((predictions_lgbm - test_set$price)^2)
+#MAE
+MAE_lgb <- caret::MAE(predictions_lgbm , test_set$price)
+
+
+cat(paste0("\nR2: ", R_sqd_lgb))
+cat(paste0("\nAdj R2: ", adj_R_lgb))
+cat(paste0("\nRMSE: ", RMSE_lgb))
+cat(paste0("\nMSE: ", MSE_lgb))
+cat(paste0("\nMAE: ", MAE_lgb))
+
+```
+
+
+```{r}
+importance <- lgb.importance(model = fit_lgbm_1)
+# Create a data frame for variable importance
+importance_df <- data.frame(
+  Feature = importance$Feature,
+  Gain = importance$Gain,
+  Cover = importance$Cover,
+  Frequency = importance$Frequency
+)
+
+# Order the data frame by Gain in descending order
+importance_df <- importance_df[order(importance_df$Gain, decreasing = FALSE), ]
+
+# Reorder the levels of the "Feature" factor variable by Gain in ascending order
+importance_df$Feature <- factor(importance_df$Feature, levels = importance_df$Feature)
+
+# Create a bar plot of variable importance using ggplot2
+ggplot(importance_df, aes(x = Gain, y = Feature)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  labs(x = "Gain", y = "Feature") +
+  ggtitle("Light GBM Variable Importance") +
+  theme_classic()
+
+```
+
+## Model Comparison
+
+
+```{r}
+# Data
+models <- c("LightGBM", "LightGBM",
+            "BART", "BART",
+            "BRT", "BRT",
+            "RF", "RF",
+            "XGBoost", "XGBoost")
+variation <- c("default", "tuned",
+               "default", "tuned",
+               "default", "tuned",
+               "default", "tuned",
+               "default", "tuned")
+models_combined <- paste(models, variation)
+RMSE_vals <- c(RMSE_lgb, RMSE_lgb_1,
+                 RMSE_bart1, RMSE_bart2,
+                 RMSE_brt, RMSE_brtt,
+                 RMSE_rf1, RMSE_rf_2,
+                 RMSE_xgb, RMSE_xgb2)
+data <- data.frame(models_combined, RMSE_vals)
+
+# Assign colors
+colors <- ifelse(grepl("tuned", data$models_combined), "red", "black")
+ggplot(data, aes(x = RMSE_vals, y = models_combined, color = colors)) +
+  geom_segment(aes(x = 0, xend = RMSE_vals, y = models_combined, yend = models_combined), size = 1) +
+  labs(x = "RMSE values", y = "Models") +
+  theme_minimal() +
+  scale_color_manual(values = c("black", "red"), labels = c("Default", "Tuned")) +
+  ggtitle("Model Comparison based on RMSE") +
+  guides(color = guide_legend(title = "Model Variation")) +
+  theme(
+    plot.background = element_rect(color = "black", fill = NA),
+    panel.border = element_rect(color = "black", fill = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  ) +
+  coord_cartesian(xlim = c(300, max(data$RMSE_vals)))
+
+
+
+```
+
+
+```{r}
+# Data
+models <- c("LightGBM", "LightGBM",
+            "BART", "BART",
+            "BRT", "BRT",
+            "RF", "RF",
+            "XGBoost", "XGBoost")
+variation <- c("default", "tuned",
+               "default", "tuned",
+               "default", "tuned",
+               "default", "tuned",
+               "default", "tuned")
+models_combined <- paste(models, variation)
+r_sd_values <- c(R_sqd_lgb_1, R_sqd_lgb_1,
+                 R_sqd_bart1, R_sqd_bart2,
+                 R_sqd_brt, R_sqd_brtt,
+                 R_sqd_rf1, R_sqd_rf_2,
+                 R_sqd_xgb, R_sqd_xgb2)
+data <- data.frame(models_combined, r_sd_values)
+
+# Assign colors
+colors <- ifelse(grepl("tuned", data$models_combined), "blue", "black")
+
+# Plot
+ggplot(data, aes(x = r_sd_values, y = models_combined, color = colors)) +
+  geom_segment(aes(x = 0.97, xend = r_sd_values, y = models_combined, yend = models_combined), 
+               size = 1) +
+  labs(x = "R-Squared Values", y = "Models") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(0.97, 0.985)) +
+  scale_color_manual(values = c("black", "blue"), labels = c("Default", "Tuned")) +
+  ggtitle("Model Comparison based on R-squared Values") +
+  guides(color = guide_legend(title = "Model Variation"))+
+  theme(
+    plot.background = element_rect(color = "black", fill = NA),
+    panel.border = element_rect(color = "black", fill = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  ) 
+
+```
+
+
+```{r}
+# Data
+models <- c("LightGBM", "LightGBM",
+            "BART", "BART",
+            "BRT", "BRT",
+            "RF", "RF",
+            "XGBoost", "XGBoost")
+variation <- c("default", "tuned",
+               "default", "tuned",
+               "default", "tuned",
+               "default", "tuned",
+               "default", "tuned")
+models_combined <- paste(models, variation)
+RMSE_vals <- c(RMSE_lgb, RMSE_lgb_1,
+                 RMSE_bart1, RMSE_bart2,
+                 RMSE_brt, RMSE_brtt,
+                 RMSE_rf1, RMSE_rf_2,
+                 RMSE_xgb, RMSE_xgb2)
+data <- data.frame(models_combined, RMSE_vals)
+
+# Calculate the maximum R-squared value
+max_r_squared <- max(data$r_sd_values)
+
+# Plot
+ggplot(data, aes(x = r_sd_values, y = models_combined, color = colors)) +
+  geom_segment(aes(x = 0.97, xend = r_sd_values, y = models_combined, yend = models_combined), 
+               size = 1) +
+  geom_vline(xintercept = max_r_squared, linetype = "dashed", color = "red") +  # Add vertical line
+  labs(x = "R-Squared Values", y = "Models") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(0.97, 0.985)) +
+  scale_color_manual(values = c("black", "blue"), labels = c("Default", "Tuned")) +
+  ggtitle("Model Comparison based on R-squared Values") +
+  guides(color = guide_legend(title = "Model Variation"))+
+  theme(
+    plot.background = element_rect(color = "black", fill = NA),
+    panel.border = element_rect(color = "black", fill = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  ) 
+
+```
+
+
+```{r}
+# Calculate the minimum RMSE value
+min_rmse <- min(data$RMSE_vals)
+
+# Plot
+ggplot(data, aes(x = RMSE_vals, y = models_combined, color = colors)) +
+  geom_segment(aes(x = 400, xend = RMSE_vals, y = models_combined, yend = models_combined), size = 1) +
+  geom_vline(xintercept = min_rmse, linetype = "dashed", color = "blue") +  # Add vertical line
+  labs(x = "RMSE values", y = "Models") +
+  theme_minimal() +
+  scale_color_manual(values = c("black", "red"), labels = c("Default", "Tuned")) +
+  ggtitle("Model Comparison based on RMSE") +
+  guides(color = guide_legend(title = "Model Variation")) +
+  theme(
+    plot.background = element_rect(color = "black", fill = NA),
+    panel.border = element_rect(color = "black", fill = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black")
+  ) +
+  coord_cartesian(xlim = c(400, max(data$RMSE_vals)))
+
+
+
+```
+
+
+#Assesing Convergence with the BART model
+```{r}
+plot(fit_bart2)
+```
+
+
+```{r}
+x = fit_bart2$varcount
+average_across_chains <- apply(x, c(2, 3), mean)
+
+# Check the dimensions of the resulting averaged data
+dim(average_across_chains)
+```
+
+# BART Importance
+
+```{r}
+x =fit_bart2$varcount
+# Calculate the average across all 4 chains
+average_across_chains <- apply(x, c(2, 3), mean)
+
+# Check the dimensions of the resulting averaged data
+dim(average_across_chains)
+
+percount20 = average_across_chains/apply(average_across_chains,1,sum)
+mvp20 = apply(percount20,2,mean)
+qm = apply(percount20,2,quantile,probs=c(.05,.95))
+p = ncol(diamonds_df[,-7])
+rgy = range(qm)
+
+plot(c(1,p),rgy,type="n",xlab="Variables",ylab="post mean, percent var use",axes=FALSE, main="BART Variable Importance")
+axis(1, at = 1:p, labels = names(mvp20), cex.lab = 0.7, cex.axis = 0.7, las = 2)  # Rotate x-axis labels by 45 degrees
+axis(2, cex.lab = 1.2, cex.axis = 1.2, las =1)
+lines(1:p, mvp20, col = "black", lty = 4, pch = 4, type = "b", lwd = 1.5)
+
+for(i in 1:p) {
+  lines(c(i,i), qm[,i], col = "blue", lty = 3, lwd = 1.0)
+}
+
+
+```
+
+```{r}
+# Arrange variables by ascending importance
+sorted_indices <- order(mvp20)
+sorted_variable_names <- names(mvp20)[sorted_indices]
+sorted_importance_values <- mvp20[sorted_indices]
+
+# Create a data frame for ggplot
+data <- data.frame(variable = factor(sorted_variable_names, levels = sorted_variable_names), importance = sorted_importance_values)
+
+# Create the plot
+ggplot(data, aes(x = importance, y = variable)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  labs(title = "BART Feature Importance",
+       x = "Importance",
+       y = "Feature") +
+  theme_classic()
+
+```
+
+
+```{r}
+
+predictions <- bind_cols(predictions_rf_2[,1], predictions_xgb_2)
+
+# Rename columns
+names(predictions) <- c("predicted_value_rf", "predicted_value_xgb")
+
+# Merge predictions with test_data based on the date column
+combined_data <- cbind(predictions,test_data)
+# Plot combined data
+ggplot(combined_data, aes(x = date)) +
+  geom_line(aes(y = diamond.price, color = "Actual"), linetype = "solid") +
+  geom_line(aes(y = predicted_value_rf, color = "RF Prediction"), linetype = "dashed") +
+  geom_line(aes(y = predicted_value_xgb, color = "XGB Prediction"), linetype = "dashed") +
+  labs(x = "Date", y = "Diamond price", title = "Diamond Price Prediction on Test Set") +
+  theme_minimal() +
+  scale_x_date(limit = as.Date(c("2020-04-28", "2021-06-04"))) +
+  scale_color_manual(name = "", # Remove the legend title
+                     values = c("Actual" = "black", "RF Prediction" = "red", "XGB Prediction" = "blue"),
+                     labels = c("Actual", "RF Prediction", "XGB Prediction")) +
+  theme(legend.position = "top") + ylim(0,12000)
+```
+
+
